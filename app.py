@@ -77,8 +77,16 @@ except ImportError:
     DOC_AVAILABLE = False
     logger.warning("docx2python not available. DOC extraction disabled.")
 
+# XLSX extraction
+try:
+    from openpyxl import load_workbook
+    XLSX_AVAILABLE = True
+except ImportError:
+    XLSX_AVAILABLE = False
+    logger.warning("openpyxl not available. XLSX extraction disabled.")
+
 # Supported file types mapping
-SUPPORTED_EXTENSIONS = ['.pdf', '.doc', '.docx', '.csv', '.txt']
+SUPPORTED_EXTENSIONS = ['.pdf', '.doc', '.docx', '.csv', '.txt', '.xlsx']
 
 def require_api_key(f):
     """
@@ -269,6 +277,26 @@ def extract_txt(file_path):
     
     return None, "Could not read text file with any supported encoding"
 
+def extract_xlsx(file_path):
+    """Extract content from XLSX file"""
+    if not XLSX_AVAILABLE:
+        return None, "XLSX extraction library not available"
+
+    try:
+        content = []
+        workbook = load_workbook(file_path, read_only=True, data_only=True)
+        try:
+            for sheet in workbook.worksheets:
+                for row in sheet.iter_rows(values_only=True):
+                    if row and any(cell is not None and str(cell).strip() for cell in row):
+                        content.append(','.join('' if cell is None else str(cell) for cell in row))
+        finally:
+            workbook.close()
+        return '\n'.join(content), None
+    except Exception as e:
+        logger.error(f"XLSX extraction error: {str(e)}")
+        return None, str(e)
+
 def download_file(url):
     """
     Download file from URL to temporary location with size limits
@@ -315,6 +343,8 @@ def download_file(url):
                 file_extension = '.docx' if 'openxml' in content_type.lower() else '.doc'
             elif 'csv' in content_type.lower() or 'text/csv' in content_type.lower():
                 file_extension = '.csv'
+            elif 'spreadsheetml' in content_type.lower():
+                file_extension = '.xlsx'
             elif 'text/plain' in content_type.lower():
                 file_extension = '.txt'
         
@@ -372,6 +402,8 @@ def resolve_file_extension(filename=None, content_type=None):
             return '.docx' if 'openxml' in content_type_lower else '.doc'
         if 'csv' in content_type_lower or 'text/csv' in content_type_lower:
             return '.csv'
+        if 'spreadsheetml' in content_type_lower:
+            return '.xlsx'
         if 'text/plain' in content_type_lower:
             return '.txt'
     
@@ -383,7 +415,8 @@ EXTRACTION_FUNCTIONS = {
     '.docx': extract_docx,
     '.doc': extract_doc,
     '.csv': extract_csv,
-    '.txt': extract_txt
+    '.txt': extract_txt,
+    '.xlsx': extract_xlsx,
 }
 
 def try_extract_with_fallback(file_path, file_extension=None):
@@ -595,6 +628,7 @@ def health():
         'pdf_support': PDF_AVAILABLE,
         'docx_support': DOCX_AVAILABLE,
         'doc_support': DOC_AVAILABLE,
+        'xlsx_support': XLSX_AVAILABLE,
         'max_file_size_mb': CONFIG['MAX_FILE_SIZE'] / (1024 * 1024),
         'auth_required': bool(CONFIG.get('FILE_EXTRACTOR_KEY', ''))
     }), 200

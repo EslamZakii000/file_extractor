@@ -236,6 +236,7 @@ curl -X POST http://localhost:5000/extract \
 - **DOC** (`.doc`) - Extracts text using docx2python
 - **CSV** (`.csv`) - Extracts all rows as text
 - **TXT** (`.txt`) - Extracts plain text content
+- **XLSX** (`.xlsx`) - Extracts cell values from all sheets using openpyxl
 
 ## Testing
 

@@ -1,9 +1,17 @@
 import base64
 import json
+import os
+import tempfile
 
 import pytest
 
 from app import app, CONFIG
+
+try:
+    from openpyxl import Workbook
+    XLSX_CREATE_AVAILABLE = True
+except ImportError:
+    XLSX_CREATE_AVAILABLE = False
 
 
 @pytest.fixture
@@ -43,6 +51,45 @@ def test_extract_base64_txt_success(client):
     assert data["file_type"] == ".txt"
     assert original_text in data["content"]
     assert data["content_length"] > 0
+
+
+def test_extract_base64_xlsx_success(client):
+    """Extract cell values from a base64-encoded XLSX payload."""
+    if not XLSX_CREATE_AVAILABLE:
+        pytest.skip("openpyxl not available for creating test files")
+
+    with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as temp_file:
+        temp_path = temp_file.name
+
+    try:
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.append(["Product", "Qty"])
+        sheet.append(["Widget", 42])
+        workbook.save(temp_path)
+
+        with open(temp_path, "rb") as file_handle:
+            payload = base64.b64encode(file_handle.read()).decode("utf-8")
+
+        response = client.post(
+            "/extract-base64",
+            headers=auth_headers(),
+            json={
+                "base64": payload,
+                "filename": "inventory.xlsx",
+                "contentType": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            },
+        )
+
+        assert response.status_code == 200
+        data = json.loads(response.data)
+        assert data["success"] is True
+        assert data["file_type"] == ".xlsx"
+        assert "Widget" in data["content"]
+        assert "42" in data["content"]
+    finally:
+        if os.path.exists(temp_path):
+            os.unlink(temp_path)
 
 
 def test_extract_base64_data_url_success(client):

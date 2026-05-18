@@ -4,7 +4,7 @@ import tempfile
 import os
 import requests
 from unittest.mock import Mock, patch
-from app import app, CONFIG, extract_pdf, extract_docx, extract_csv, extract_txt, extract_doc
+from app import app, CONFIG, extract_pdf, extract_docx, extract_csv, extract_txt, extract_doc, extract_xlsx
 
 # Try to import libraries for creating test files
 try:
@@ -19,6 +19,12 @@ try:
     PDF_CREATE_AVAILABLE = True
 except ImportError:
     PDF_CREATE_AVAILABLE = False
+
+try:
+    from openpyxl import Workbook
+    XLSX_CREATE_AVAILABLE = True
+except ImportError:
+    XLSX_CREATE_AVAILABLE = False
 
 @pytest.fixture
 def client():
@@ -128,6 +134,27 @@ startxref
         c.drawString(100, 710, "This is a real PDF file created for testing.")
         c.save()
     
+    yield temp_path
+    if os.path.exists(temp_path):
+        os.unlink(temp_path)
+
+@pytest.fixture
+def sample_xlsx_file():
+    """Create a real XLSX file for testing"""
+    if not XLSX_CREATE_AVAILABLE:
+        pytest.skip("openpyxl not available for creating test files")
+
+    with tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False) as f:
+        temp_path = f.name
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Sheet1"
+    sheet.append(["Name", "Age", "City"])
+    sheet.append(["Alice", 28, "Boston"])
+    sheet.append(["Bob", 35, "Chicago"])
+    workbook.save(temp_path)
+
     yield temp_path
     if os.path.exists(temp_path):
         os.unlink(temp_path)
@@ -275,6 +302,30 @@ class TestExtractRoute:
         # Check for actual content from the DOCX file
         assert 'test DOCX document' in data['content'] or 'test' in data['content'].lower()
         assert len(data['content']) > 0
+
+    @patch('app.requests.get')
+    def test_extract_xlsx_file(self, mock_get, client, sample_xlsx_file):
+        """Test extracting content from XLSX file - REAL EXTRACTION"""
+        with open(sample_xlsx_file, 'rb') as f:
+            file_content = f.read()
+
+        mock_response = Mock()
+        mock_response.iter_content = Mock(return_value=[file_content])
+        mock_response.headers = {
+            'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        }
+        mock_response.raise_for_status = Mock()
+        mock_get.return_value = mock_response
+
+        response = client.get('/extract?url=https://example.com/data.xlsx')
+        assert response.status_code == 200
+        data = json.loads(response.data)
+        assert data['success'] is True
+        assert data['file_type'] == '.xlsx'
+        assert 'Alice' in data['content']
+        assert 'Bob' in data['content']
+        assert 'Boston' in data['content']
+        assert 'Chicago' in data['content']
     
     @patch('app.requests.get')
     def test_extract_unsupported_file_type(self, mock_get, client):
@@ -420,6 +471,18 @@ class TestExtractionFunctions:
         # Should contain some text from the document
         assert 'test' in content.lower() or 'document' in content.lower()
 
+    def test_extract_xlsx_function(self, sample_xlsx_file):
+        """Test XLSX extraction function with real XLSX file"""
+        if not XLSX_CREATE_AVAILABLE:
+            pytest.skip("openpyxl not available")
+
+        content, error = extract_xlsx(sample_xlsx_file)
+        assert error is None
+        assert content is not None
+        assert 'Alice' in content
+        assert 'Bob' in content
+        assert 'Boston' in content
+
 
 class TestOtherEndpoints:
     """Test cases for other endpoints"""
@@ -433,6 +496,7 @@ class TestOtherEndpoints:
         assert 'pdf_support' in data
         assert 'docx_support' in data
         assert 'doc_support' in data
+        assert 'xlsx_support' in data
     
     def test_index_endpoint(self, client):
         """Test root endpoint"""
@@ -442,3 +506,4 @@ class TestOtherEndpoints:
         assert 'message' in data
         assert 'endpoints' in data
         assert 'supported_formats' in data
+        assert '.xlsx' in data['supported_formats']
