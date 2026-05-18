@@ -351,12 +351,14 @@ def detect_file_extension(file_path):
         return '.xlsx'
     return None
 
-def download_file(url):
+def download_file(url, filename=None, content_type_hint=None):
     """
     Download file from URL to temporary location with size limits
     
     Args:
         url: URL to download from
+        filename: Optional original filename from client (used when URL has no extension)
+        content_type_hint: Optional MIME type from client
         
     Returns:
         tuple: (file_path, file_extension, error_message)
@@ -380,27 +382,16 @@ def download_file(url):
             except ValueError:
                 pass  # Invalid content-length, continue
         
-        # Get file extension from URL or Content-Type
-        content_type = response.headers.get('Content-Type', '')
-        file_extension = None
-        
-        # Try to get extension from URL
-        url_path = Path(url.split('?')[0])  # Remove query parameters
-        if url_path.suffix:
-            file_extension = url_path.suffix.lower()
-        
-        # If no extension from URL, try Content-Type
+        response_content_type = response.headers.get('Content-Type', '')
+        file_extension = resolve_file_extension(filename, content_type_hint)
+
         if not file_extension:
-            if 'pdf' in content_type.lower():
-                file_extension = '.pdf'
-            elif 'word' in content_type.lower() or 'document' in content_type.lower():
-                file_extension = '.docx' if 'openxml' in content_type.lower() else '.doc'
-            elif 'csv' in content_type.lower() or 'text/csv' in content_type.lower():
-                file_extension = '.csv'
-            elif 'spreadsheetml' in content_type.lower() or 'excel' in content_type.lower():
-                file_extension = '.xlsx'
-            elif 'text/plain' in content_type.lower():
-                file_extension = '.txt'
+            url_path = Path(url.split('?')[0])  # Remove query parameters
+            if url_path.suffix:
+                file_extension = url_path.suffix.lower()
+
+        if not file_extension:
+            file_extension = extension_from_content_type(response_content_type)
         
         # Create temporary file
         suffix = file_extension or '.tmp'
@@ -436,6 +427,33 @@ def download_file(url):
         logger.error(f"Unexpected download error: {str(e)}")
         return None, None, f"Unexpected error: {str(e)}"
 
+def extension_from_content_type(content_type):
+    """
+    Map MIME type to file extension.
+
+    Order matters: spreadsheet types must be checked before wordprocessing,
+    because spreadsheet MIME types contain 'officedocument' (not 'document' alone).
+    """
+    if not content_type:
+        return None
+
+    content_type_lower = content_type.lower().split(';')[0].strip()
+
+    if 'spreadsheetml' in content_type_lower or 'excel' in content_type_lower:
+        return '.xlsx'
+    if 'wordprocessingml' in content_type_lower:
+        return '.docx'
+    if content_type_lower in ('application/msword',) or 'ms-word' in content_type_lower:
+        return '.doc'
+    if 'pdf' in content_type_lower:
+        return '.pdf'
+    if 'csv' in content_type_lower or content_type_lower == 'text/csv':
+        return '.csv'
+    if content_type_lower == 'text/plain':
+        return '.txt'
+
+    return None
+
 def resolve_file_extension(filename=None, content_type=None):
     """
     Resolve file extension from filename or Content-Type.
@@ -451,21 +469,8 @@ def resolve_file_extension(filename=None, content_type=None):
         suffix = Path(filename).suffix.lower()
         if suffix:
             return suffix
-    
-    if content_type:
-        content_type_lower = content_type.lower()
-        if 'pdf' in content_type_lower:
-            return '.pdf'
-        if 'word' in content_type_lower or 'document' in content_type_lower:
-            return '.docx' if 'openxml' in content_type_lower else '.doc'
-        if 'csv' in content_type_lower or 'text/csv' in content_type_lower:
-            return '.csv'
-        if 'spreadsheetml' in content_type_lower or 'excel' in content_type_lower:
-            return '.xlsx'
-        if 'text/plain' in content_type_lower:
-            return '.txt'
-    
-    return None
+
+    return extension_from_content_type(content_type)
 
 # Extraction function mapping
 EXTRACTION_FUNCTIONS = {
@@ -525,13 +530,17 @@ def extract():
     """Extract content from file URL"""
     file_path = None
     try:
-        # Get file URL from request
+        # Get file URL and optional metadata from request
         if request.method == 'POST':
             data = request.get_json() or {}
             file_url = data.get('url') or request.form.get('url')
+            filename = data.get('filename')
+            content_type = data.get('contentType') or data.get('content_type')
         else:
             file_url = request.args.get('url')
-        
+            filename = request.args.get('filename')
+            content_type = request.args.get('contentType') or request.args.get('content_type')
+
         if not file_url:
             logger.warning("Extraction request without URL")
             return jsonify({
@@ -544,10 +553,17 @@ def extract():
             logger.warning(f"Invalid URL rejected: {file_url[:100]}")
             return jsonify({'error': f'Invalid URL: {error_msg}'}), 400
         
-        logger.info(f"Extraction request for URL: {file_url[:100]}...")
-        
+        logger.info(
+            f"Extraction request for URL: {file_url[:100]}... "
+            f"filename={filename}, content_type={content_type}"
+        )
+
         # Download file
-        file_path, file_extension, error = download_file(file_url)
+        file_path, file_extension, error = download_file(
+            file_url,
+            filename=filename,
+            content_type_hint=content_type,
+        )
         if error:
             logger.error(f"Download failed: {error}")
             return jsonify({'error': error}), 400

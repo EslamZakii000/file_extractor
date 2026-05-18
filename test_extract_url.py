@@ -4,7 +4,17 @@ import tempfile
 import os
 import requests
 from unittest.mock import Mock, patch
-from app import app, CONFIG, extract_pdf, extract_docx, extract_csv, extract_txt, extract_xlsx, try_extract_with_fallback
+from app import (
+    app,
+    CONFIG,
+    extension_from_content_type,
+    extract_pdf,
+    extract_docx,
+    extract_csv,
+    extract_txt,
+    extract_xlsx,
+    try_extract_with_fallback,
+)
 
 # Try to import libraries for creating test files
 try:
@@ -326,6 +336,51 @@ class TestExtractRoute:
         assert 'Bob' in data['content']
         assert 'Boston' in data['content']
         assert 'Chicago' in data['content']
+
+    @patch('app.requests.get')
+    def test_extract_xlsx_cdn_url_without_extension(self, mock_get, client, sample_xlsx_file):
+        """XLSX from CDN URLs must not be misdetected as DOCX via Content-Type."""
+        with open(sample_xlsx_file, 'rb') as file_handle:
+            file_content = file_handle.read()
+
+        mock_response = Mock()
+        mock_response.iter_content = Mock(return_value=[file_content])
+        mock_response.headers = {
+            'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        }
+        mock_response.raise_for_status = Mock()
+        mock_get.return_value = mock_response
+
+        response = client.get(
+            '/extract?url=https://cdn.example.com/attachments/6796b093-1700-42c7-96b9-6aca35c08c62'
+        )
+        assert response.status_code == 200
+        data = json.loads(response.data)
+        assert data['file_type'] == '.xlsx'
+        assert 'Alice' in data['content']
+
+    @patch('app.requests.get')
+    def test_extract_xlsx_with_filename_query_param(self, mock_get, client, sample_xlsx_file):
+        """Client-provided filename should be used when CDN URL has no extension."""
+        with open(sample_xlsx_file, 'rb') as file_handle:
+            file_content = file_handle.read()
+
+        mock_response = Mock()
+        mock_response.iter_content = Mock(return_value=[file_content])
+        mock_response.headers = {'Content-Type': 'application/octet-stream'}
+        mock_response.raise_for_status = Mock()
+        mock_get.return_value = mock_response
+
+        response = client.get(
+            '/extract'
+            '?url=https://cdn.example.com/attachments/uuid'
+            '&filename=20260409_Template%20Greenberg.xlsx'
+            '&contentType=application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        )
+        assert response.status_code == 200
+        data = json.loads(response.data)
+        assert data['file_type'] == '.xlsx'
+        assert 'Alice' in data['content']
     
     @patch('app.requests.get')
     def test_extract_unsupported_file_type(self, mock_get, client):
@@ -411,7 +466,12 @@ class TestExtractRoute:
 
 class TestExtractionFunctions:
     """Test cases for individual extraction functions - REAL EXTRACTION"""
-    
+
+    def test_extension_from_content_type_xlsx_not_docx(self):
+        """Spreadsheet MIME types must not match generic 'document' heuristics."""
+        mime = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        assert extension_from_content_type(mime) == '.xlsx'
+
     def test_extract_txt_function(self):
         """Test TXT extraction function with real file"""
         with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, encoding='utf-8') as f:
