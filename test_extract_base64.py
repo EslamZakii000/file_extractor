@@ -92,6 +92,45 @@ def test_extract_base64_xlsx_success(client):
             os.unlink(temp_path)
 
 
+def test_extract_base64_xlsx_without_filename_extension(client):
+    """Detect XLSX from payload signature when filename has no extension."""
+    if not XLSX_CREATE_AVAILABLE:
+        pytest.skip("openpyxl not available for creating test files")
+
+    with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as temp_file:
+        temp_path = temp_file.name
+
+    try:
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.append(["SKU", "Count"])
+        sheet.append(["ABC-123", 7])
+        workbook.save(temp_path)
+
+        with open(temp_path, "rb") as file_handle:
+            payload = base64.b64encode(file_handle.read()).decode("utf-8")
+
+        response = client.post(
+            "/extract-base64",
+            headers=auth_headers(),
+            json={
+                "base64": payload,
+                "filename": "spreadsheet",
+                "contentType": "application/octet-stream",
+            },
+        )
+
+        assert response.status_code == 200
+        data = json.loads(response.data)
+        assert data["success"] is True
+        assert data["file_type"] == ".xlsx"
+        assert "ABC-123" in data["content"]
+        assert "7" in data["content"]
+    finally:
+        if os.path.exists(temp_path):
+            os.unlink(temp_path)
+
+
 def test_extract_base64_data_url_success(client):
     """Extract text from a data URL base64 payload."""
     original_text = "Data URL test content"

@@ -11,6 +11,8 @@ import binascii
 from pathlib import Path
 import csv
 import logging
+import zipfile
+from io import BytesIO
 from urllib.parse import urlparse
 from functools import lru_cache
 from dotenv import load_dotenv
@@ -277,25 +279,77 @@ def extract_txt(file_path):
     
     return None, "Could not read text file with any supported encoding"
 
+def is_xlsx_bytes(file_bytes):
+    """Detect XLSX payloads by ZIP structure."""
+    try:
+        with zipfile.ZipFile(BytesIO(file_bytes)) as archive:
+            return any(name.startswith('xl/') for name in archive.namelist())
+    except (zipfile.BadZipFile, OSError, ValueError):
+        return False
+
+def is_xlsx_file(file_path):
+    """Detect XLSX files by ZIP structure (Office Open XML spreadsheet)."""
+    try:
+        if not zipfile.is_zipfile(file_path):
+            return False
+        with zipfile.ZipFile(file_path) as archive:
+            return any(name.startswith('xl/') for name in archive.namelist())
+    except (zipfile.BadZipFile, OSError):
+        return False
+
+def ensure_file_extension_path(file_path, file_extension):
+    """Rename temp files so libraries that require extensions (e.g. openpyxl) can open them."""
+    if not file_extension:
+        return file_path
+    current_suffix = Path(file_path).suffix.lower()
+    if current_suffix == file_extension:
+        return file_path
+    new_path = str(Path(file_path).with_suffix(file_extension))
+    os.rename(file_path, new_path)
+    return new_path
+
+def _read_xlsx_rows(workbook):
+    """Read non-empty rows from all sheets in a workbook."""
+    rows = []
+    for sheet_name in workbook.sheetnames:
+        sheet = workbook[sheet_name]
+        for row in sheet.iter_rows(values_only=True):
+            if row and any(cell is not None and str(cell).strip() for cell in row):
+                rows.append(','.join('' if cell is None else str(cell) for cell in row))
+    return rows
+
 def extract_xlsx(file_path):
     """Extract content from XLSX file"""
     if not XLSX_AVAILABLE:
         return None, "XLSX extraction library not available"
 
     try:
-        content = []
-        workbook = load_workbook(file_path, read_only=True, data_only=True)
-        try:
-            for sheet in workbook.worksheets:
-                for row in sheet.iter_rows(values_only=True):
-                    if row and any(cell is not None and str(cell).strip() for cell in row):
-                        content.append(','.join('' if cell is None else str(cell) for cell in row))
-        finally:
-            workbook.close()
-        return '\n'.join(content), None
+        rows = []
+        # Try cached values first, then formula text if sheet appears empty.
+        for data_only in (True, False):
+            workbook = load_workbook(file_path, read_only=False, data_only=data_only)
+            try:
+                rows = _read_xlsx_rows(workbook)
+            finally:
+                workbook.close()
+            if rows:
+                break
+
+        if not rows:
+            return None, "No cell values found in XLSX file"
+        return '\n'.join(rows), None
     except Exception as e:
         logger.error(f"XLSX extraction error: {str(e)}")
         return None, str(e)
+
+def detect_file_extension(file_path):
+    """Infer file extension from path suffix or file signature."""
+    suffix = Path(file_path).suffix.lower()
+    if suffix in EXTRACTION_FUNCTIONS:
+        return suffix
+    if is_xlsx_file(file_path):
+        return '.xlsx'
+    return None
 
 def download_file(url):
     """
@@ -343,7 +397,7 @@ def download_file(url):
                 file_extension = '.docx' if 'openxml' in content_type.lower() else '.doc'
             elif 'csv' in content_type.lower() or 'text/csv' in content_type.lower():
                 file_extension = '.csv'
-            elif 'spreadsheetml' in content_type.lower():
+            elif 'spreadsheetml' in content_type.lower() or 'excel' in content_type.lower():
                 file_extension = '.xlsx'
             elif 'text/plain' in content_type.lower():
                 file_extension = '.txt'
@@ -366,8 +420,12 @@ def download_file(url):
         finally:
             temp_file.close()
         
+        if not file_extension:
+            file_extension = detect_file_extension(temp_file.name)
+
+        final_path = ensure_file_extension_path(temp_file.name, file_extension)
         logger.info(f"Downloaded file: {downloaded} bytes, extension: {file_extension}")
-        return temp_file.name, file_extension, None
+        return final_path, file_extension, None
         
     except requests.Timeout:
         return None, None, f"Request timeout (>{CONFIG['REQUEST_TIMEOUT']}s)"
@@ -402,7 +460,7 @@ def resolve_file_extension(filename=None, content_type=None):
             return '.docx' if 'openxml' in content_type_lower else '.doc'
         if 'csv' in content_type_lower or 'text/csv' in content_type_lower:
             return '.csv'
-        if 'spreadsheetml' in content_type_lower:
+        if 'spreadsheetml' in content_type_lower or 'excel' in content_type_lower:
             return '.xlsx'
         if 'text/plain' in content_type_lower:
             return '.txt'
@@ -430,15 +488,20 @@ def try_extract_with_fallback(file_path, file_extension=None):
     Returns:
         tuple: (content, detected_extension, error_message)
     """
-    # If we have a known extension, try it first
+    if not file_extension:
+        file_extension = detect_file_extension(file_path)
+
+    # If extension is known, use only the matching extractor (no cross-format fallback).
     if file_extension and file_extension in EXTRACTION_FUNCTIONS:
         extract_func = EXTRACTION_FUNCTIONS[file_extension]
         try:
             content, error = extract_func(file_path)
             if content and not error:
                 return content, file_extension, None
+            return None, file_extension, error or "Failed to extract content from file"
         except Exception as e:
             logger.debug(f"Extraction with {file_extension} failed: {str(e)}")
+            return None, file_extension, str(e)
     
     # Try all supported formats
     for ext, extract_func in EXTRACTION_FUNCTIONS.items():
@@ -575,13 +638,19 @@ def extract_base64():
             }), 400
         
         file_extension = resolve_file_extension(filename, content_type)
+        if not file_extension and is_xlsx_bytes(file_bytes):
+            file_extension = '.xlsx'
         temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=file_extension or '.tmp')
         try:
             temp_file.write(file_bytes)
         finally:
             temp_file.close()
-        
-        file_path = temp_file.name
+
+        file_path = ensure_file_extension_path(
+            temp_file.name,
+            file_extension or detect_file_extension(temp_file.name),
+        )
+        file_extension = Path(file_path).suffix.lower() or file_extension
         logger.info(
             f"Base64 extraction request. filename={filename}, content_type={content_type}, "
             f"bytes={len(file_bytes)}, extension={file_extension}"

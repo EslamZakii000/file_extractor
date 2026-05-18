@@ -4,7 +4,7 @@ import tempfile
 import os
 import requests
 from unittest.mock import Mock, patch
-from app import app, CONFIG, extract_pdf, extract_docx, extract_csv, extract_txt, extract_doc, extract_xlsx
+from app import app, CONFIG, extract_pdf, extract_docx, extract_csv, extract_txt, extract_xlsx, try_extract_with_fallback
 
 # Try to import libraries for creating test files
 try:
@@ -482,6 +482,74 @@ class TestExtractionFunctions:
         assert 'Alice' in content
         assert 'Bob' in content
         assert 'Boston' in content
+
+    def test_extract_xlsx_formula_cells(self):
+        """Formula-only sheets should still return formula text, not empty content."""
+        if not XLSX_CREATE_AVAILABLE:
+            pytest.skip("openpyxl not available")
+
+        with tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False) as temp_file:
+            temp_path = temp_file.name
+
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet['A1'] = '=1+2'
+        sheet['A2'] = 'visible text'
+        workbook.save(temp_path)
+        workbook.close()
+
+        try:
+            content, error = extract_xlsx(temp_path)
+            assert error is None
+            assert content is not None
+            assert 'visible text' in content
+        finally:
+            if os.path.exists(temp_path):
+                os.unlink(temp_path)
+
+    def test_extract_xlsx_known_extension_no_csv_fallback(self):
+        """Known .xlsx files must not fall back to CSV and return ZIP garbage."""
+        if not XLSX_CREATE_AVAILABLE:
+            pytest.skip("openpyxl not available")
+
+        with tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False) as temp_file:
+            temp_path = temp_file.name
+
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet['A1'] = '=SUM(1,2)'
+        workbook.save(temp_path)
+        workbook.close()
+
+        try:
+            content, detected_ext, error = try_extract_with_fallback(temp_path, '.xlsx')
+            assert error is None
+            assert detected_ext == '.xlsx'
+            assert content is not None
+            assert '=SUM(1,2)' in content
+            assert 'PK' not in content
+        finally:
+            if os.path.exists(temp_path):
+                os.unlink(temp_path)
+
+    @patch('app.requests.get')
+    def test_extract_xlsx_without_filename_extension(self, mock_get, client, sample_xlsx_file):
+        """Detect XLSX from file signature when URL has no extension."""
+        with open(sample_xlsx_file, 'rb') as file_handle:
+            file_content = file_handle.read()
+
+        mock_response = Mock()
+        mock_response.iter_content = Mock(return_value=[file_content])
+        mock_response.headers = {'Content-Type': 'application/octet-stream'}
+        mock_response.raise_for_status = Mock()
+        mock_get.return_value = mock_response
+
+        response = client.get('/extract?url=https://example.com/download')
+        assert response.status_code == 200
+        data = json.loads(response.data)
+        assert data['success'] is True
+        assert data['file_type'] == '.xlsx'
+        assert 'Alice' in data['content']
 
 
 class TestOtherEndpoints:
